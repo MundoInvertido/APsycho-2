@@ -295,3 +295,4 @@ function notify(text, type) {
   show(el);
   setTimeout(() => hide(el), 5000);
 }
+// text
