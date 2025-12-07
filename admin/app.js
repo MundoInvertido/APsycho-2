@@ -1,255 +1,297 @@
-// ===== Utilidades =====
-const qs = (s)=>document.querySelector(s);
-const showEl = (el)=>el.classList.remove('hidden');
-const hideEl = (el)=>el.classList.add('hidden');
+// ===== UTILITÁRIOS =====
+const qs = s => document.querySelector(s);
+const show = el => el?.classList.remove('hidden');
+const hide = el => el?.classList.add('hidden');
 
-async function sha256Hex(message){
-  const data = new TextEncoder().encode(message);
+async function sha256Hex(msg) {
+  const data = new TextEncoder().encode(msg);
   const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-  return Array.from(new Uint8Array(hashBuffer)).map(b=>b.toString(16).padStart(2,'0')).join('');
+  return Array.from(new Uint8Array(hashBuffer)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
-// ===== Caminho do JSON de administradores =====
-const ADMIN_HASH_URL = '/admin/private/hashes_administradores.json';
+// ===== CONFIGURAÇÃO =====
+const PRIVATE_DB_URL = 'private/alunos_db.json';
+const ADMIN_HASH_URL = 'private/hashes_administradores.json';
 
-async function fetchAdminHashes(){
-  const res = await fetch(ADMIN_HASH_URL, { cache: 'no-store' });
-  if (!res.ok) throw new Error(`HTTP ${res.status} em ${ADMIN_HASH_URL}`);
-  const data = await res.json();
-  if (Array.isArray(data)) return data;
-  if (Array.isArray(data.validAdmins)) return data.validAdmins.map(v => v.hash);
-  if (Array.isArray(data.validHashes)) return data.validHashes;
-  console.warn('[admin] formato inesperado no arquivo de administradores:', data);
-  return [];
-}
+let studentsDB = [];
 
-// ===== Gate (login) =====
-async function doLogin(){
+// ===== 1. LOGIN =====
+async function doLogin() {
   const email = qs('#email').value.trim().toLowerCase();
-  const pass  = qs('#password').value;
-  const msgEl = qs('#gateMsg');
-  msgEl.textContent = '';
-  hideEl(msgEl);
-
-  if(!email || !pass){
-    msgEl.textContent = 'Informe e-mail e senha.';
-    showEl(msgEl);
-    return;
-  }
-
-  let list = [];
-  try{
-    list = await fetchAdminHashes();
-    console.info('[admin] lista de admins carregada:', list.length);
-  }catch(e){
-    console.error('Falha ao carregar lista de admins:', e);
-    msgEl.textContent = 'Não foi possível carregar a lista de administradores. Verifique o caminho do arquivo.';
-    showEl(msgEl);
-    return;
-  }
-
-  const candidate = await sha256Hex(email + pass);
-  console.debug('[admin] hash calculado para este login:', candidate);
-
-  if(list.includes(candidate)){
-    sessionStorage.setItem('admin_auth_hash', candidate);
-    hideEl(qs('#gate'));
-    showEl(qs('#app'));
-  } else {
-    msgEl.textContent = 'Credenciais inválidas.';
-    showEl(msgEl);
+  const pass = qs('#password').value;
+  const msg = qs('#gateMsg');
+  
+  if(!email || !pass) return alert("Preencha tudo.");
+  msg.textContent = "Verificando..."; show(msg);
+  
+  try {
+    const res = await fetch(ADMIN_HASH_URL, { cache: 'no-store' });
+    if(!res.ok) throw new Error("Erro ao ler lista de admins.");
+    const validHashes = await res.json();
+    const myHash = await sha256Hex(email + pass);
+    
+    if (validHashes.includes(myHash)) {
+      sessionStorage.setItem('admin_auth', myHash);
+      hide(qs('#gate'));
+      show(qs('#app'));
+    } else {
+      msg.textContent = "Senha incorreta.";
+    }
+  } catch(e) {
+    alert("Erro crítico: " + e.message);
   }
 }
+qs('#loginBtn').addEventListener('click', doLogin);
 
-function doLogout(){
-  sessionStorage.removeItem('admin_auth_hash');
-  location.reload();
-}
+// ===== 2. MODO NUVEM (CLOUD) =====
 
-qs('#loginBtn')?.addEventListener('click', doLogin);
-qs('#logoutBtn')?.addEventListener('click', doLogout);
-qs('#debugHash')?.addEventListener('click', async ()=>{
-  const email = qs('#email').value.trim().toLowerCase();
-  const pass  = qs('#password').value;
-  const msgEl = qs('#gateMsg');
-  if(!email || !pass){
-    msgEl.textContent = 'Para debug, preencha e-mail e senha.';
-    showEl(msgEl);
-    return;
-  }
-  const candidate = await sha256Hex(email + pass);
-  msgEl.textContent = `Meu hash agora: ${candidate}`;
-  msgEl.classList.remove('bad'); msgEl.classList.add('ok');
-  showEl(msgEl);
-});
-window.addEventListener('keydown', (e)=>{
-  if(e.key==='Enter' && qs('#app') && !qs('#app').classList.contains('hidden')) return;
-  if(e.key==='Enter') doLogin();
-});
+// Carregar do Site
+qs('#btn-load-db').addEventListener('click', async () => {
+  const btn = qs('#btn-load-db');
+  btn.textContent = "⏳ Baixando...";
+  btn.disabled = true;
 
-// ===== Gerador de hashes =====
-let sheetData = [];
-let detected = { email:null, inscricao:null, senha:null, combined:null };
-let mergedHashes = [];
-
-const fileSheet = qs('#file-sheet');
-const fileJSON  = qs('#file-json');
-const summary   = qs('#summary');
-const columnsDiv= qs('#columns');
-const preview   = qs('#preview');
-const generateBtn = qs('#generate');
-const downloadBtn = qs('#download');
-const modeSelect  = qs('#mode');
-
-document.querySelector("label[for='file-sheet']")?.addEventListener('click',()=>fileSheet.click());
-document.querySelector("label[for='file-json']")?.addEventListener('click',()=>fileJSON.click());
-
-fileSheet?.addEventListener('change', async (ev)=>{
-  const f = ev.target.files[0];
-  if(!f) return;
-  summary.textContent = 'Carregando...';
-  sheetData = [];
-  try{
-    const buf = await f.arrayBuffer();
-    const wb = XLSX.read(buf, { type:'array' });
-    const ws = wb.Sheets[wb.SheetNames[0]];
-    const json = XLSX.utils.sheet_to_json(ws, { defval:'' });
-    sheetData = json;
-    summary.textContent = `Linhas lidas: ${json.length}`;
-    detectColumns(json);
-  }catch(e){
+  try {
+    const res = await fetch(PRIVATE_DB_URL, { cache: 'no-store' });
+    if(res.status === 404) {
+      studentsDB = [];
+      notify("Nenhum banco de dados encontrado no site (404). Inicie um novo.", "ok");
+    } else if (res.ok) {
+      studentsDB = await res.json();
+      notify(`Sucesso! ${studentsDB.length} alunos baixados do site.`, "ok");
+    } else {
+      throw new Error("Erro HTTP " + res.status);
+    }
+    renderTable();
+  } catch(e) {
     console.error(e);
-    summary.textContent = 'Falha ao ler a planilha: '+e.message;
+    notify("Erro ao baixar da nuvem: " + e.message, "bad");
+  } finally {
+    btn.textContent = "🔄 Baixar do Site (Load)";
+    btn.disabled = false;
   }
 });
 
-fileJSON?.addEventListener('change', async (ev)=>{
-  const f = ev.target.files[0];
-  if(!f) return;
-  try{
-    const text = await f.text();
-    const data = JSON.parse(text);
-    if(Array.isArray(data)) mergedHashes = data.slice();
-    else if(Array.isArray(data.validHashes)) mergedHashes = data.validHashes.slice();
-    else mergedHashes = [];
-    summary.textContent = `JSON carregado: ${mergedHashes.length} hashes`;
-  }catch(e){
-    console.error(e);
-    summary.textContent = 'Falha ao ler JSON: '+e.message;
-  }
-});
+// Salvar no Site (Deploy)
+qs('#btn-save-cloud').addEventListener('click', async () => {
+  const apiKey = qs('#api-key').value.trim();
+  const apiUrl = qs('#api-url').value.trim();
+  
+  if(!apiKey || !apiUrl) return alert("Preencha a API Key e URL abaixo.");
+  if(!confirm(`Isso vai sobrescrever o site com os ${studentsDB.length} alunos da lista atual. Confirmar?`)) return;
 
-function detectColumns(json){
-  detected = { email:null, inscricao:null, senha:null, combined:null };
-  if(!json || !json.length){ columnsDiv.innerHTML = '—'; return; }
-  const keys = Object.keys(json[0]);
-  for(const k of keys){
-    const l = k.toLowerCase();
-    if(!detected.email && l.includes('email')) detected.email = k;
-    if(!detected.inscricao && (l.includes('inscr')||l.includes('inscrição')||l.includes('matricula')||l.includes('id'))) detected.inscricao = k;
-    if(!detected.senha && l.includes('senha')) detected.senha = k;
-  }
-  columnsDiv.innerHTML = '';
-  for(const k of keys){
-    const row = document.createElement('div');
-    row.className = 'row';
-    const label = document.createElement('div');
-    label.textContent = k;
-    label.style.flex='1';
-    const select = document.createElement('select');
-    select.innerHTML = `<option value="">-- ignorar --</option><option value="email">email</option><option value="inscricao">inscricao</option><option value="senha">senha</option>`;
-    select.value = (detected.email===k?'email':(detected.inscricao===k?'inscricao':(detected.senha===k?'senha':'')));
-    select.addEventListener('change',()=>{
-      for(const key in detected) if(detected[key]===k) detected[key]=null;
-      if(select.value) detected[select.value]=k;
+  const btn = qs('#btn-save-cloud');
+  btn.disabled = true;
+  btn.textContent = "🚀 Enviando...";
+
+  try {
+    const publicHashes = [];
+    for(const s of studentsDB) {
+      const hash = await sha256Hex(s.email + s.inscricao);
+      publicHashes.push(hash);
+    }
+
+    const payload = {
+      files: [
+        { path: 'hashes_membros.json', content: JSON.stringify(publicHashes, null, 2) },
+        { path: 'admin/private/alunos_db.json', content: JSON.stringify(studentsDB, null, 2) }
+      ]
+    };
+
+    const res = await fetch(apiUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + apiKey },
+      body: JSON.stringify(payload)
     });
-    row.appendChild(label);
-    row.appendChild(select);
-    columnsDiv.appendChild(row);
-  }
-}
 
-generateBtn?.addEventListener('click', async ()=>{
-  if(!sheetData.length){ alert('Carregue uma planilha primeiro.'); return; }
-  const mode = modeSelect.value;
-  const emailCol = detected.email;
-  const inscrCol = detected.inscricao;
-  const senhaCol = detected.senha;
-  if(!emailCol){ alert('Não foi possível detectar a coluna de e-mail.'); return; }
-  if(mode==='inscricao' && !inscrCol){ alert('Selecione a coluna de inscrição.'); return; }
-  if(mode==='senha' && !senhaCol){ alert('Selecione a coluna de senha.'); return; }
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.error || "Erro no envio");
 
-  summary.textContent = 'Gerando hashes...';
-  const hashes = [];
-  for(let i=0;i<sheetData.length;i++){
-    const row = sheetData[i];
-    const email = String(row[emailCol]||'').trim().toLowerCase();
-    const keyPart = mode==='inscricao' ? String(row[inscrCol]||'').trim() : String(row[senhaCol]||'').trim();
-    if(!email || !keyPart) continue;
-    const h = await sha256Hex(email + keyPart);
-    hashes.push(h);
-    if(i%250===0) await new Promise(r=>setTimeout(r,0));
+    notify("✅ Site atualizado com sucesso!", "ok");
+
+  } catch(e) {
+    console.error(e);
+    notify("Erro ao enviar: " + e.message, "bad");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "🚀 Enviar para o Site (Deploy)";
   }
-  const combined = Array.from(new Set([...(mergedHashes||[]), ...hashes]));
-  mergedHashes = combined;
-  preview.textContent = combined.slice(0,20).map((h,i)=>`${i+1}. ${h}`).join('\n') || '—';
-  summary.textContent = `Hashes gerados: ${hashes.length} (total após mesclagem: ${combined.length})`;
-  showEl(downloadBtn);
 });
 
-downloadBtn?.addEventListener('click', ()=>{
-  const blob = new Blob([JSON.stringify(mergedHashes,null,2)], {type:'application/json'});
+// ===== 3. MODO MANUAL (LOCAL) =====
+
+// Conecta os botões visíveis aos inputs ocultos
+qs('#trigger-db-local').addEventListener('click', () => qs('#file-db-local').click());
+qs('#trigger-sheet').addEventListener('click', () => qs('#file-sheet').click());
+
+// Salvar Backup Local (Download)
+qs('#btn-save-local').addEventListener('click', () => {
+  if(!studentsDB.length) return alert("A lista está vazia.");
+  
+  const blob = new Blob([JSON.stringify(studentsDB, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'hashes_membros.json';
+  const date = new Date().toISOString().slice(0,10);
+  a.download = `backup_alunos_${date}.json`;
   document.body.appendChild(a);
   a.click();
   a.remove();
-  URL.revokeObjectURL(url);
+  notify("Backup salvo no seu computador.", "ok");
 });
 
-// ===== Envio seguro ao GitHub (via Worker) =====
-async function pushHashesToServer(){
-  const apiUrl = qs('#api-url').value.trim();
-  const apiKey = qs('#api-key').value.trim();
-  const msgEl = qs('#remoteMsg');
-  msgEl.className='alert';
-  msgEl.textContent='';
-  hideEl(msgEl);
+// Carregar Backup Local (Upload JSON)
+qs('#file-db-local').addEventListener('change', async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
 
-  if(!apiUrl || !apiKey){
-    msgEl.textContent='Preencha API URL e Admin API Key.';
-    msgEl.classList.add('bad');
-    showEl(msgEl);
-    return;
+  try {
+    const text = await f.text();
+    const json = JSON.parse(text);
+    if(Array.isArray(json)) {
+      studentsDB = json;
+      renderTable();
+      notify(`Backup carregado! ${json.length} alunos recuperados.`, "ok");
+    } else {
+      alert("Arquivo inválido. Precisa ser uma lista de alunos.");
+    }
+  } catch(err) {
+    alert("Erro ao ler JSON: " + err.message);
   }
-  if(!Array.isArray(mergedHashes) || !mergedHashes.length){
-    msgEl.textContent='Gere hashes primeiro.';
-    msgEl.classList.add('bad');
-    showEl(msgEl);
-    return;
-  }
+  e.target.value = ''; // Reseta input
+});
 
-  const onlyHex = mergedHashes.filter(h=>/^[a-f0-9]{64}$/.test(h));
-  try{
-    const res = await fetch(apiUrl, {
-      method:'POST',
-      headers:{
-        'Content-Type':'application/json',
-        'Authorization':'Bearer '+apiKey
-      },
-      body: JSON.stringify({ hashes: onlyHex })
+// Importar Excel
+qs('#file-sheet').addEventListener('change', async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+
+  try {
+    const buf = await f.arrayBuffer();
+    const wb = XLSX.read(buf, { type: 'array' });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const json = XLSX.utils.sheet_to_json(ws, { defval: '' });
+
+    if (!json.length) return alert("Planilha vazia.");
+
+    let count = 0;
+    const keys = Object.keys(json[0]);
+    let map = { nome: null, email: null, cpf: null, inscricao: null };
+
+    keys.forEach(k => {
+      const low = k.toLowerCase();
+      if(low.includes('nome') || low.includes('name') || low.includes('aluno')) map.nome = k;
+      if(low.includes('mail')) map.email = k;
+      if(low.includes('cpf') || low.includes('doc')) map.cpf = k;
+      if(low.includes('inscr') || low.includes('senha') || low.includes('key')) map.inscricao = k;
     });
-    const data = await res.json().catch(()=>({}));
-    if(!res.ok){ throw new Error((data && data.error) || ('HTTP '+res.status)); }
-    msgEl.textContent = `OK ✅ PR #${data.pr_number || '?'} criado. Novos: ${data.added}. Total: ${data.total}.`;
-    msgEl.classList.add('ok');
-    showEl(msgEl);
-  }catch(e){
-    msgEl.textContent = 'Falha ao enviar: '+e.message;
-    msgEl.classList.add('bad');
-    showEl(msgEl);
+
+    if(!map.email || !map.inscricao) {
+      return alert("Colunas 'Email' e 'Inscrição' não identificadas automaticamente.");
+    }
+
+    json.forEach(row => {
+      const s = {
+        nome: row[map.nome] ? String(row[map.nome]).trim() : '',
+        email: row[map.email] ? String(row[map.email]).trim().toLowerCase() : '',
+        cpf: row[map.cpf] ? String(row[map.cpf]).trim() : '',
+        inscricao: row[map.inscricao] ? String(row[map.inscricao]).trim() : ''
+      };
+      if(s.email && s.inscricao) {
+        addStudentToDB(s);
+        count++;
+      }
+    });
+
+    notify(`Importação Excel: ${count} novos registros processados.`, "ok");
+    e.target.value = ''; 
+
+  } catch (err) {
+    console.error(err);
+    notify("Erro ao ler planilha: " + err.message, "bad");
   }
+});
+
+// ===== 4. GESTÃO DA TABELA =====
+
+// Limpar Tudo
+qs('#btn-clear-all').addEventListener('click', () => {
+  if(confirm('Tem certeza? Isso apagará a lista atual da memória.')) {
+    studentsDB = [];
+    renderTable();
+    notify("Lista limpa.", "ok");
+  }
+});
+
+function renderTable() {
+  const tbody = qs('#studentTable tbody');
+  qs('#count').textContent = studentsDB.length;
+  tbody.innerHTML = '';
+
+  const sorted = [...studentsDB].sort((a,b) => (a.nome||'').localeCompare(b.nome||''));
+
+  sorted.forEach((s) => {
+    // Usamos o índice no array original
+    const originalIndex = studentsDB.indexOf(s);
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${s.nome || '-'}</td>
+      <td>${s.email}</td>
+      <td>${s.cpf || '-'}</td>
+      <td>${s.inscricao}</td>
+      <td>
+        <button class="btn-delete" data-index="${originalIndex}" style="background:none;border:none;cursor:pointer;color:#f87171" title="Remover">🗑️</button>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
 }
-qs('#pushRemote')?.addEventListener('click', pushHashesToServer);
+
+// Event Delegation para o botão Deletar (funciona mesmo com CSP estrita)
+qs('#studentTable').addEventListener('click', (e) => {
+  const btn = e.target.closest('.btn-delete');
+  if (btn) {
+    const idx = btn.dataset.index;
+    if(confirm("Remover este aluno?")) {
+      studentsDB.splice(idx, 1);
+      renderTable();
+      notify("Aluno removido. Lembre de Salvar.", "bad");
+    }
+  }
+});
+
+// Adicionar Manualmente
+qs('#btn-add').addEventListener('click', () => {
+  const nome = qs('#new-name').value.trim();
+  const email = qs('#new-email').value.trim().toLowerCase();
+  const cpf = qs('#new-cpf').value.trim();
+  const inscricao = qs('#new-key').value.trim();
+
+  addStudentToDB({ nome, email, cpf, inscricao });
+  
+  qs('#new-name').value = '';
+  qs('#new-email').value = '';
+  qs('#new-cpf').value = '';
+  qs('#new-key').value = '';
+});
+
+function addStudentToDB(student) {
+  if(!student.email || !student.inscricao) return alert("E-mail e Inscrição obrigatórios.");
+  
+  const existingIndex = studentsDB.findIndex(s => s.email === student.email);
+  
+  if (existingIndex >= 0) {
+    studentsDB[existingIndex] = student; // Atualiza
+  } else {
+    studentsDB.push(student); // Adiciona
+  }
+  renderTable();
+}
+
+function notify(text, type) {
+  const el = qs('#statusMsg');
+  el.textContent = text;
+  el.className = `alert ${type}`;
+  show(el);
+  setTimeout(() => hide(el), 5000);
+}
